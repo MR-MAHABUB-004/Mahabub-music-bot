@@ -1,13 +1,124 @@
 import asyncio
+import glob
 import os
 import re
+import time
+import urllib.request
 from dataclasses import dataclass
 from typing import Optional
 
 import yt_dlp
 from pytgcalls.types import MediaStream
 
-from config import COOKIES_FILE
+from config import (
+    COOKIES_FILE,
+    AUDIO_CACHE_DIR,
+    AUDIO_CACHE_MAX_MB,
+)
+
+os.makedirs(AUDIO_CACHE_DIR, exist_ok=True)
+
+
+# ============================================================
+# YouTube "visitor_data" — this is a per-session ID that
+# YouTube's own player fetches from the homepage. Sending it
+# with requests makes traffic from a datacenter/VPS IP look
+# far less like a bare scraper, which reduces (not eliminates)
+# how often the "Sign in to confirm you're not a bot" wall
+# shows up. Refreshed every 2 hours, best-effort only.
+# ============================================================
+
+_visitor_data: Optional[str] = None
+_visitor_data_fetched_at: float = 0.0
+_VISITOR_DATA_TTL = 2 * 60 * 60
+
+
+def _get_visitor_data() -> Optional[str]:
+
+    global _visitor_data, _visitor_data_fetched_at
+
+    now = time.time()
+
+    if (
+        _visitor_data
+        and (now - _visitor_data_fetched_at) < _VISITOR_DATA_TTL
+    ):
+        return _visitor_data
+
+    try:
+        req = urllib.request.Request(
+            "https://www.youtube.com/",
+            headers={
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/131.0.0.0 Safari/537.36"
+                )
+            },
+        )
+
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            html = resp.read().decode("utf-8", "ignore")
+
+        match = re.search(r'"visitorData":"([^"]+)"', html)
+
+        if match:
+            _visitor_data = match.group(1)
+            _visitor_data_fetched_at = now
+
+    except Exception:
+        # Best-effort only — fine to proceed without it.
+        pass
+
+    return _visitor_data
+
+
+# ============================================================
+# Disk cache housekeeping
+# ============================================================
+
+def _trim_cache():
+
+    try:
+        files = [
+            os.path.join(AUDIO_CACHE_DIR, f)
+            for f in os.listdir(AUDIO_CACHE_DIR)
+        ]
+        files = [f for f in files if os.path.isfile(f)]
+
+        total = sum(os.path.getsize(f) for f in files)
+        limit = AUDIO_CACHE_MAX_MB * 1024 * 1024
+
+        if total <= limit:
+            return
+
+        # Oldest (by last modified) first.
+        files.sort(key=os.path.getmtime)
+
+        for f in files:
+            if total <= limit:
+                break
+            try:
+                total -= os.path.getsize(f)
+                os.remove(f)
+            except OSError:
+                pass
+
+    except Exception:
+        pass
+
+
+def _find_cached(video_id: str) -> Optional[str]:
+
+    matches = glob.glob(
+        os.path.join(AUDIO_CACHE_DIR, f"{video_id}.*")
+    )
+
+    for m in matches:
+        if os.path.isfile(m) and os.path.getsize(m) > 0:
+            return m
+
+    return None
 
 
 @dataclass
@@ -45,15 +156,12 @@ class MusicPlayer:
     # ========================================================
 
     # YouTube keeps changing which "client" is allowed to fetch
-    # playable URLs without a PO Token / sign-in wall. Rather than
+    # playable audio without a PO Token / sign-in wall. Rather than
     # hard-coding one client (which breaks again in a few months),
-    # try several, in order, and use whichever one actually returns
-    # a usable stream.
-    #   - web_safari: serves HLS (m3u8) formats, no PO Token today
-    #   - tv: no PO Token required, but formats are DRM'd without
-    #     cookies from a logged-in/guest session
-    #   - android: no sign-in wall for most videos, but audio-only
-    #     formats can 403 without a PO Token
+    # try several, in order, and use whichever one actually works.
+    #   - web_safari: serves HLS (m3u8), no PO Token today
+    #   - tv: no PO Token required, but needs cookies to avoid DRM
+    #   - android: usually no sign-in wall, may 403 on audio-only
     #   - web (+cookies, if provided): last resort
     _CLIENT_ATTEMPTS = [
         ["web_safari"],
@@ -69,93 +177,54 @@ class MusicPlayer:
             "no_warnings": True,
             "noplaylist": True,
 
-            # Audio only
             "format": "bestaudio/best",
 
-            "skip_download": True,
-
             "source_address": "0.0.0.0",
-
-            # Better compatibility
             "nocheckcertificate": True,
+
+            "outtmpl": os.path.join(
+                AUDIO_CACHE_DIR, "%(extractor)s-%(id)s.%(ext)s"
+            ),
+
+            # Don't re-download a track we already have cached.
+            "overwrites": False,
         }
 
-        # If a cookies file is present, use it. Required for the
-        # "tv" client to unlock non-DRM formats, and helps every
-        # other client avoid the sign-in wall too.
         if COOKIES_FILE and os.path.isfile(COOKIES_FILE):
             options["cookiefile"] = COOKIES_FILE
 
         return options
 
-
     @staticmethod
-    def _best_media_url(info: dict) -> Optional[str]:
+    def _downloaded_path(info: dict):
 
-        # yt-dlp already picked a winning format.
-        media_url = info.get("url")
+        downloads = info.get("requested_downloads") or []
 
-        if media_url:
-            return media_url
+        if downloads and downloads[0].get("filepath"):
+            path = downloads[0]["filepath"]
+            if os.path.isfile(path):
+                return path
 
-        formats = info.get("formats", []) or []
-
-        def has_url(f):
-            return bool(f.get("url"))
-
-        # Prefer real audio-only formats.
-        audio_only = [
-            f for f in formats
-            if has_url(f)
-            and f.get("vcodec") in (None, "none")
-            and f.get("acodec") not in (None, "none")
-        ]
-
-        # Otherwise accept any format with a playable url
-        # (muxed audio+video is fine, ffmpeg only needs the URL).
-        any_playable = [
-            f for f in formats
-            if has_url(f)
-            and f.get("acodec") not in (None, "none")
-        ]
-
-        candidates = audio_only or any_playable
-
-        if not candidates:
-            return None
-
-        candidates.sort(
-            key=lambda f: (f.get("abr") or f.get("tbr") or 0),
-            reverse=True,
-        )
-
-        return candidates[0]["url"]
-
+        return None
 
     async def _extract(self, query: str) -> Track:
 
         loop = asyncio.get_running_loop()
 
+        def download_via_youtube(target: str):
 
-        def extract():
-
-            target = query
-
-            if not re.match(
-                r"^https?://",
-                query,
-                re.IGNORECASE
-            ):
-                target = f"ytsearch1:{query}"
-
-            last_error: Optional[Exception] = None
+            last_error = None
+            visitor_data = _get_visitor_data()
 
             for client in self._CLIENT_ATTEMPTS:
 
                 options = self._base_options()
-                options["extractor_args"] = {
-                    "youtube": {"player_client": client}
-                }
+
+                yt_args = {"player_client": client}
+                if visitor_data:
+                    yt_args["visitor_data"] = [visitor_data]
+
+                options["extractor_args"] = {"youtube": yt_args}
 
                 try:
 
@@ -163,7 +232,7 @@ class MusicPlayer:
 
                         info = ydl.extract_info(
                             target,
-                            download=False,
+                            download=True,
                         )
 
                         if info and info.get("entries"):
@@ -173,63 +242,102 @@ class MusicPlayer:
                             )
 
                         if not info:
-                            last_error = RuntimeError(
-                                "Song not found."
-                            )
+                            last_error = RuntimeError("Song not found.")
                             continue
 
-                        # Search results (and some client
-                        # responses) come back "flat", without
-                        # format info. Re-resolve by URL to get
-                        # full format data if needed.
-                        fresh = info
-
-                        if not fresh.get("formats") and not fresh.get("url"):
-
-                            webpage_url = (
-                                fresh.get("webpage_url")
-                                or fresh.get("original_url")
+                        path = (
+                            self._downloaded_path(info)
+                            or _find_cached(
+                                f"{info.get('extractor', 'youtube')}"
+                                f"-{info.get('id', '')}"
                             )
+                        )
 
-                            if webpage_url:
-                                fresh = ydl.extract_info(
-                                    webpage_url,
-                                    download=False,
-                                )
-
-                        media_url = self._best_media_url(fresh)
-
-                        if not media_url:
+                        if not path:
                             last_error = RuntimeError(
-                                f"No playable stream from "
-                                f"'{client[0]}' client."
+                                f"Download via '{client[0]}' "
+                                f"client produced no file."
                             )
                             continue
 
                         return Track(
                             query=query,
-                            title=(
-                                fresh.get("title")
-                                or info.get("title")
-                                or "Unknown"
-                            ),
-                            url=media_url,
-                            duration=int(
-                                fresh.get("duration")
-                                or info.get("duration")
-                                or 0
-                            ),
+                            title=info.get("title") or "Unknown",
+                            url=path,
+                            duration=int(info.get("duration") or 0),
                         )
 
                 except Exception as exc:
                     last_error = exc
                     continue
 
-            raise RuntimeError(
-                "Could not obtain audio stream. "
-                f"Last error: {last_error}"
-            )
+            raise RuntimeError(str(last_error))
 
+        def download_via_soundcloud(search_query: str):
+
+            options = self._base_options()
+
+            with yt_dlp.YoutubeDL(options) as ydl:
+
+                info = ydl.extract_info(
+                    f"scsearch1:{search_query}",
+                    download=True,
+                )
+
+                if info and info.get("entries"):
+                    info = next(
+                        (e for e in info["entries"] if e),
+                        None,
+                    )
+
+                if not info:
+                    raise RuntimeError("Song not found on SoundCloud.")
+
+                path = self._downloaded_path(info) or _find_cached(
+                    f"{info.get('extractor', 'soundcloud')}"
+                    f"-{info.get('id', '')}"
+                )
+
+                if not path:
+                    raise RuntimeError(
+                        "SoundCloud download produced no file."
+                    )
+
+                return Track(
+                    query=search_query,
+                    title=info.get("title") or "Unknown",
+                    url=path,
+                    duration=int(info.get("duration") or 0),
+                )
+
+        def extract():
+
+            is_url = bool(re.match(r"^https?://", query, re.IGNORECASE))
+            target = query if is_url else f"ytsearch1:{query}"
+
+            try:
+                track = download_via_youtube(target)
+                _trim_cache()
+                return track
+
+            except Exception as yt_error:
+
+                if is_url:
+                    raise RuntimeError(
+                        f"Could not obtain audio stream. ({yt_error})"
+                    )
+
+                try:
+                    track = download_via_soundcloud(query)
+                    _trim_cache()
+                    return track
+
+                except Exception as sc_error:
+                    raise RuntimeError(
+                        "Could not obtain audio stream.\n"
+                        f"YouTube: {yt_error}\n"
+                        f"SoundCloud: {sc_error}"
+                    )
 
         return await loop.run_in_executor(
             None,

@@ -14,6 +14,16 @@ SESSION_STRING = os.getenv("SESSION_STRING", "")
 # Leave the file missing/empty to run without cookies.
 COOKIES_FILE = os.getenv("COOKIES_FILE", "cookies.txt")
 
+# Where downloaded audio files are cached on disk. We download the
+# full track before playing it (instead of streaming a live YouTube
+# URL), since expiring/PO-Token-gated URLs are what was causing
+# "Could not obtain audio stream".
+AUDIO_CACHE_DIR = os.getenv("AUDIO_CACHE_DIR", "/tmp/mahabub_audio_cache")
+
+# Soft cap on the cache directory size; oldest files are trimmed
+# past this to keep disk usage bounded on small VPS instances.
+AUDIO_CACHE_MAX_MB = int(os.getenv("AUDIO_CACHE_MAX_MB", "1000"))
+
 if not API_ID:
     raise RuntimeError("API_ID is missing.")
 
