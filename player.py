@@ -44,7 +44,25 @@ class MusicPlayer:
     # Extract YouTube audio
     # ========================================================
 
-    async def _extract(self, query: str) -> Track:
+    # YouTube keeps changing which "client" is allowed to fetch
+    # playable URLs without a PO Token / sign-in wall. Rather than
+    # hard-coding one client (which breaks again in a few months),
+    # try several, in order, and use whichever one actually returns
+    # a usable stream.
+    #   - web_safari: serves HLS (m3u8) formats, no PO Token today
+    #   - tv: no PO Token required, but formats are DRM'd without
+    #     cookies from a logged-in/guest session
+    #   - android: no sign-in wall for most videos, but audio-only
+    #     formats can 403 without a PO Token
+    #   - web (+cookies, if provided): last resort
+    _CLIENT_ATTEMPTS = [
+        ["web_safari"],
+        ["tv"],
+        ["android"],
+        ["web"],
+    ]
+
+    def _base_options(self) -> dict:
 
         options = {
             "quiet": True,
@@ -60,29 +78,61 @@ class MusicPlayer:
 
             # Better compatibility
             "nocheckcertificate": True,
-
-            # The "web" client is the one YouTube's bot-check gates
-            # hardest. android/ios clients don't require sign-in for
-            # most videos, so try those first before falling back.
-            "extractor_args": {
-                "youtube": {
-                    "player_client": ["android", "ios", "web"],
-                }
-            },
-
-            "http_headers": {
-                "User-Agent": (
-                    "com.google.android.youtube/19.29.37 "
-                    "(Linux; U; Android 14) gzip"
-                ),
-            },
         }
 
-        # If a cookies file is present, use it. This is required if
-        # YouTube still demands sign-in for a given video even with
-        # the android/ios clients above.
+        # If a cookies file is present, use it. Required for the
+        # "tv" client to unlock non-DRM formats, and helps every
+        # other client avoid the sign-in wall too.
         if COOKIES_FILE and os.path.isfile(COOKIES_FILE):
             options["cookiefile"] = COOKIES_FILE
+
+        return options
+
+
+    @staticmethod
+    def _best_media_url(info: dict) -> Optional[str]:
+
+        # yt-dlp already picked a winning format.
+        media_url = info.get("url")
+
+        if media_url:
+            return media_url
+
+        formats = info.get("formats", []) or []
+
+        def has_url(f):
+            return bool(f.get("url"))
+
+        # Prefer real audio-only formats.
+        audio_only = [
+            f for f in formats
+            if has_url(f)
+            and f.get("vcodec") in (None, "none")
+            and f.get("acodec") not in (None, "none")
+        ]
+
+        # Otherwise accept any format with a playable url
+        # (muxed audio+video is fine, ffmpeg only needs the URL).
+        any_playable = [
+            f for f in formats
+            if has_url(f)
+            and f.get("acodec") not in (None, "none")
+        ]
+
+        candidates = audio_only or any_playable
+
+        if not candidates:
+            return None
+
+        candidates.sort(
+            key=lambda f: (f.get("abr") or f.get("tbr") or 0),
+            reverse=True,
+        )
+
+        return candidates[0]["url"]
+
+
+    async def _extract(self, query: str) -> Track:
 
         loop = asyncio.get_running_loop()
 
@@ -98,122 +148,87 @@ class MusicPlayer:
             ):
                 target = f"ytsearch1:{query}"
 
+            last_error: Optional[Exception] = None
 
-            with yt_dlp.YoutubeDL(
-                options
-            ) as ydl:
+            for client in self._CLIENT_ATTEMPTS:
 
-                info = ydl.extract_info(
-                    target,
-                    download=False
-                )
+                options = self._base_options()
+                options["extractor_args"] = {
+                    "youtube": {"player_client": client}
+                }
 
+                try:
 
-                if info.get("entries"):
+                    with yt_dlp.YoutubeDL(options) as ydl:
 
-                    info = next(
-                        (
-                            entry
-                            for entry in info["entries"]
-                            if entry
-                        ),
-                        None
-                    )
-
-
-                if not info:
-
-                    raise RuntimeError(
-                        "Song not found."
-                    )
-
-
-                webpage_url = (
-                    info.get("webpage_url")
-                    or info.get("original_url")
-                    or info.get("url")
-                )
-
-
-                if not webpage_url:
-
-                    raise RuntimeError(
-                        "Could not resolve YouTube URL."
-                    )
-
-
-                # Resolve fresh direct audio URL
-                fresh = ydl.extract_info(
-                    webpage_url,
-                    download=False
-                )
-
-
-                media_url = fresh.get("url")
-
-
-                if not media_url:
-
-                    # Sometimes formats contains the URL
-                    formats = fresh.get(
-                        "formats",
-                        []
-                    )
-
-                    audio_formats = [
-                        f
-                        for f in formats
-                        if f.get("url")
-                        and (
-                            f.get("acodec")
-                            not in (
-                                None,
-                                "none"
-                            )
+                        info = ydl.extract_info(
+                            target,
+                            download=False,
                         )
-                    ]
 
+                        if info and info.get("entries"):
+                            info = next(
+                                (e for e in info["entries"] if e),
+                                None,
+                            )
 
-                    if audio_formats:
+                        if not info:
+                            last_error = RuntimeError(
+                                "Song not found."
+                            )
+                            continue
 
-                        audio_formats.sort(
-                            key=lambda x:
-                            (
-                                x.get("abr")
+                        # Search results (and some client
+                        # responses) come back "flat", without
+                        # format info. Re-resolve by URL to get
+                        # full format data if needed.
+                        fresh = info
+
+                        if not fresh.get("formats") and not fresh.get("url"):
+
+                            webpage_url = (
+                                fresh.get("webpage_url")
+                                or fresh.get("original_url")
+                            )
+
+                            if webpage_url:
+                                fresh = ydl.extract_info(
+                                    webpage_url,
+                                    download=False,
+                                )
+
+                        media_url = self._best_media_url(fresh)
+
+                        if not media_url:
+                            last_error = RuntimeError(
+                                f"No playable stream from "
+                                f"'{client[0]}' client."
+                            )
+                            continue
+
+                        return Track(
+                            query=query,
+                            title=(
+                                fresh.get("title")
+                                or info.get("title")
+                                or "Unknown"
+                            ),
+                            url=media_url,
+                            duration=int(
+                                fresh.get("duration")
+                                or info.get("duration")
                                 or 0
                             ),
-                            reverse=True
                         )
 
-                        media_url = (
-                            audio_formats[0]["url"]
-                        )
+                except Exception as exc:
+                    last_error = exc
+                    continue
 
-
-                if not media_url:
-
-                    raise RuntimeError(
-                        "Could not obtain audio stream."
-                    )
-
-
-                return Track(
-                    query=query,
-
-                    title=(
-                        fresh.get("title")
-                        or info.get("title")
-                        or "Unknown"
-                    ),
-
-                    url=media_url,
-
-                    duration=int(
-                        fresh.get("duration")
-                        or info.get("duration")
-                        or 0
-                    ),
-                )
+            raise RuntimeError(
+                "Could not obtain audio stream. "
+                f"Last error: {last_error}"
+            )
 
 
         return await loop.run_in_executor(
