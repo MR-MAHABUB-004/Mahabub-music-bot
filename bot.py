@@ -571,7 +571,16 @@ if __name__ == "__main__":
 
     try:
 
-        asyncio.run(main())
+        # NOTE: `bot`, `assistant`, and `calls` above are created at
+        # import time (module load), before any event loop exists.
+        # `asyncio.run(main())` always creates a *brand-new* loop —
+        # different from whatever loop those objects implicitly
+        # bound their internal locks/queues to — which is exactly
+        # what causes "Future ... attached to a different loop".
+        # Reusing the same (already-current) loop instead of
+        # asyncio.run() fixes that mismatch.
+        loop = asyncio.get_event_loop()
+        loop.run_until_complete(main())
 
     except KeyboardInterrupt:
 
