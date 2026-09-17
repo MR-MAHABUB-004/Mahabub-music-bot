@@ -9,6 +9,11 @@ API_HASH = os.getenv("API_HASH", "")
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 SESSION_STRING = os.getenv("SESSION_STRING", "")
 
+# Path to a Netscape-format cookies.txt used by yt-dlp to avoid
+# YouTube's "Sign in to confirm you're not a bot" check.
+# Leave the file missing/empty to run without cookies.
+COOKIES_FILE = os.getenv("COOKIES_FILE", "cookies.txt")
+
 if not API_ID:
     raise RuntimeError("API_ID is missing.")
 

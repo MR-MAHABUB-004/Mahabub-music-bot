@@ -1,10 +1,13 @@
 import asyncio
+import os
 import re
 from dataclasses import dataclass
 from typing import Optional
 
 import yt_dlp
 from pytgcalls.types import MediaStream
+
+from config import COOKIES_FILE
 
 
 @dataclass
@@ -57,7 +60,29 @@ class MusicPlayer:
 
             # Better compatibility
             "nocheckcertificate": True,
+
+            # The "web" client is the one YouTube's bot-check gates
+            # hardest. android/ios clients don't require sign-in for
+            # most videos, so try those first before falling back.
+            "extractor_args": {
+                "youtube": {
+                    "player_client": ["android", "ios", "web"],
+                }
+            },
+
+            "http_headers": {
+                "User-Agent": (
+                    "com.google.android.youtube/19.29.37 "
+                    "(Linux; U; Android 14) gzip"
+                ),
+            },
         }
+
+        # If a cookies file is present, use it. This is required if
+        # YouTube still demands sign-in for a given video even with
+        # the android/ios clients above.
+        if COOKIES_FILE and os.path.isfile(COOKIES_FILE):
+            options["cookiefile"] = COOKIES_FILE
 
         loop = asyncio.get_running_loop()
 
