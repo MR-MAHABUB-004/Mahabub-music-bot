@@ -1,12 +1,15 @@
 import asyncio
 import logging
 
-# =========================================================
-# Pyrogram / PyTgCalls compatibility fix
-# =========================================================
+# ============================================================
+# Pyrogram -> PyTgCalls compatibility
+# PyTgCalls expects these old exception names.
+# Pyrogram 2.0.106 exposes GroupCallForbidden/Invalid instead.
+# ============================================================
 
 import pyrogram.errors
 
+# GroupcallForbidden
 if not hasattr(pyrogram.errors, "GroupcallForbidden"):
     if hasattr(pyrogram.errors, "GroupCallForbidden"):
         pyrogram.errors.GroupcallForbidden = (
@@ -19,9 +22,22 @@ if not hasattr(pyrogram.errors, "GroupcallForbidden"):
         pyrogram.errors.GroupcallForbidden = GroupcallForbidden
 
 
-# =========================================================
+# GroupcallInvalid
+if not hasattr(pyrogram.errors, "GroupcallInvalid"):
+    if hasattr(pyrogram.errors, "GroupCallInvalid"):
+        pyrogram.errors.GroupcallInvalid = (
+            pyrogram.errors.GroupCallInvalid
+        )
+    else:
+        class GroupcallInvalid(Exception):
+            pass
+
+        pyrogram.errors.GroupcallInvalid = GroupcallInvalid
+
+
+# ============================================================
 # Imports
-# =========================================================
+# ============================================================
 
 from pyrogram import Client, filters
 from pyrogram.types import Message
@@ -40,9 +56,9 @@ from config import (
 from player import MusicPlayer
 
 
-# =========================================================
+# ============================================================
 # Logging
-# =========================================================
+# ============================================================
 
 logging.basicConfig(
     level=logging.INFO,
@@ -52,9 +68,29 @@ logging.basicConfig(
 log = logging.getLogger("MahabubMusicBot")
 
 
-# =========================================================
-# Bot Account
-# =========================================================
+# ============================================================
+# Validate configuration
+# ============================================================
+
+if not API_ID:
+    raise RuntimeError("API_ID is missing.")
+
+if not API_HASH:
+    raise RuntimeError("API_HASH is missing.")
+
+if not BOT_TOKEN:
+    raise RuntimeError("BOT_TOKEN is missing.")
+
+if not SESSION_STRING:
+    raise RuntimeError(
+        "SESSION_STRING is missing. "
+        "A user account is required for voice chats."
+    )
+
+
+# ============================================================
+# Telegram Bot Account
+# ============================================================
 
 bot = Client(
     "mahbub_bot",
@@ -64,16 +100,10 @@ bot = Client(
 )
 
 
-# =========================================================
-# Assistant User Account
-# This account joins the Telegram Voice Chat
-# =========================================================
-
-if not SESSION_STRING:
-    raise RuntimeError(
-        "SESSION_STRING is missing. "
-        "A user account is required for voice chats."
-    )
+# ============================================================
+# Telegram User Account
+# This account joins the voice chat.
+# ============================================================
 
 assistant = Client(
     "mahbub_assistant",
@@ -83,44 +113,45 @@ assistant = Client(
 )
 
 
-# =========================================================
+# ============================================================
 # PyTgCalls
-# =========================================================
+# ============================================================
 
 calls = PyTgCalls(assistant)
 
 players = {}
 
 
-# =========================================================
-# Player Manager
-# =========================================================
+# ============================================================
+# Player manager
+# ============================================================
 
 def get_player(chat_id: int) -> MusicPlayer:
     if chat_id not in players:
         players[chat_id] = MusicPlayer(
             chat_id,
-            calls
+            calls,
         )
 
     return players[chat_id]
 
 
-# =========================================================
-# Stream End Handler
-# =========================================================
+# ============================================================
+# Stream ended
+# ============================================================
 
 @calls.on_update(tg_filters.stream_end())
 async def stream_end_handler(_, update: StreamEnded):
+
     player = players.get(update.chat_id)
 
     if player:
         await player.on_stream_end()
 
 
-# =========================================================
+# ============================================================
 # START
-# =========================================================
+# ============================================================
 
 @bot.on_message(filters.command("start"))
 async def start_cmd(_, message: Message):
@@ -139,9 +170,9 @@ async def start_cmd(_, message: Message):
     )
 
 
-# =========================================================
+# ============================================================
 # PLAY
-# =========================================================
+# ============================================================
 
 @bot.on_message(filters.command(["play", "p"]))
 async def play_cmd(_, message: Message):
@@ -155,7 +186,7 @@ async def play_cmd(_, message: Message):
 
     if len(parts) < 2:
         return await message.reply_text(
-            "❌ Usage:\n"
+            "❌ **Usage:**\n"
             "`/play song name or YouTube URL`"
         )
 
@@ -176,7 +207,7 @@ async def play_cmd(_, message: Message):
             message.chat.id
         )
 
-        user_id = (
+        requester = (
             message.from_user.id
             if message.from_user
             else 0
@@ -184,7 +215,7 @@ async def play_cmd(_, message: Message):
 
         title = await player.add(
             query,
-            user_id
+            requester,
         )
 
         if player.current:
@@ -207,17 +238,14 @@ async def play_cmd(_, message: Message):
             "Play failed"
         )
 
-        try:
-            await status.edit_text(
-                f"❌ `{str(exc)[:900]}`"
-            )
-        except Exception:
-            pass
+        await status.edit_text(
+            f"❌ `{str(exc)[:900]}`"
+        )
 
 
-# =========================================================
+# ============================================================
 # PAUSE
-# =========================================================
+# ============================================================
 
 @bot.on_message(filters.command("pause"))
 async def pause_cmd(_, message: Message):
@@ -243,9 +271,9 @@ async def pause_cmd(_, message: Message):
         )
 
 
-# =========================================================
+# ============================================================
 # RESUME
-# =========================================================
+# ============================================================
 
 @bot.on_message(filters.command("resume"))
 async def resume_cmd(_, message: Message):
@@ -271,9 +299,9 @@ async def resume_cmd(_, message: Message):
         )
 
 
-# =========================================================
+# ============================================================
 # SKIP
-# =========================================================
+# ============================================================
 
 @bot.on_message(filters.command("skip"))
 async def skip_cmd(_, message: Message):
@@ -308,9 +336,9 @@ async def skip_cmd(_, message: Message):
         )
 
 
-# =========================================================
+# ============================================================
 # STOP / LEAVE
-# =========================================================
+# ============================================================
 
 @bot.on_message(
     filters.command(
@@ -340,21 +368,19 @@ async def stop_cmd(_, message: Message):
         )
 
 
-# =========================================================
+# ============================================================
 # QUEUE
-# =========================================================
+# ============================================================
 
 @bot.on_message(filters.command("queue"))
 async def queue_cmd(_, message: Message):
 
     try:
 
-        text = get_player(
-            message.chat.id
-        ).queue_text()
-
         await message.reply_text(
-            text
+            get_player(
+                message.chat.id
+            ).queue_text()
         )
 
     except Exception as exc:
@@ -368,21 +394,19 @@ async def queue_cmd(_, message: Message):
         )
 
 
-# =========================================================
-# NOW PLAYING
-# =========================================================
+# ============================================================
+# NOW
+# ============================================================
 
 @bot.on_message(filters.command("now"))
 async def now_cmd(_, message: Message):
 
     try:
 
-        text = get_player(
-            message.chat.id
-        ).now_text()
-
         await message.reply_text(
-            text
+            get_player(
+                message.chat.id
+            ).now_text()
         )
 
     except Exception as exc:
@@ -396,9 +420,9 @@ async def now_cmd(_, message: Message):
         )
 
 
-# =========================================================
+# ============================================================
 # VOLUME
-# =========================================================
+# ============================================================
 
 @bot.on_message(filters.command("volume"))
 async def volume_cmd(_, message: Message):
@@ -406,23 +430,19 @@ async def volume_cmd(_, message: Message):
     parts = message.text.split()
 
     if len(parts) != 2:
-
         return await message.reply_text(
             "❌ Usage: `/volume 1-200`"
         )
 
     try:
-
         value = int(parts[1])
 
     except ValueError:
-
         return await message.reply_text(
             "❌ Volume must be a number."
         )
 
     if not 1 <= value <= 200:
-
         return await message.reply_text(
             "❌ Volume must be between 1 and 200."
         )
@@ -448,97 +468,41 @@ async def volume_cmd(_, message: Message):
         )
 
 
-# =========================================================
+# ============================================================
 # MAIN
-# =========================================================
+# ============================================================
 
 async def main():
 
     log.info(
-        "Starting command bot..."
+        "Starting Mahabub Music Bot..."
     )
 
+    # Start bot
     await bot.start()
 
     log.info(
-        "Starting assistant user account..."
+        "Command bot started."
     )
 
+    # Start user account
     await assistant.start()
 
     log.info(
-        "Starting PyTgCalls..."
+        "Assistant user account started."
     )
 
+    # Start voice call engine
     await calls.start()
 
-    try:
+    me = await assistant.get_me()
 
-        me = await assistant.get_me()
+    log.info(
+        "Voice assistant: %s (@%s) | ID: %s",
+        me.first_name,
+        me.username or "none",
+        me.id,
+    )
 
-        log.info(
-            "Voice assistant logged in as %s (%s)",
-            me.first_name,
-            me.id,
-        )
-
-        print(
-            "🎵 Mahabub Music Bot is running."
-        )
-
-        await asyncio.Event().wait()
-
-    finally:
-
-        log.info(
-            "Stopping PyTgCalls..."
-        )
-
-        try:
-            await calls.stop()
-        except Exception:
-            pass
-
-        log.info(
-            "Stopping assistant..."
-        )
-
-        try:
-            await assistant.stop()
-        except Exception:
-            pass
-
-        log.info(
-            "Stopping bot..."
-        )
-
-        try:
-            await bot.stop()
-        except Exception:
-            pass
-
-
-# =========================================================
-# RUN
-# =========================================================
-
-if __name__ == "__main__":
-
-    try:
-
-        asyncio.run(
-            main()
-        )
-
-    except KeyboardInterrupt:
-
-        print(
-            "\n🛑 Bot stopped."
-        )
-
-    except Exception as exc:
-
-        log.exception(
-            "Fatal error: %s",
-            exc
-        )
+    print(
+        "🎵
