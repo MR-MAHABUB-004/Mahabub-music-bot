@@ -492,7 +492,7 @@ async def main():
         "Assistant user account started."
     )
 
-    # Start voice call engine
+      # Start voice call engine
     await calls.start()
 
     me = await assistant.get_me()
@@ -505,4 +505,16 @@ async def main():
     )
 
     print(
-        "🎵
+        "\n"
+        "🎵 MAHABUB MUSIC BOT\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🤖 Bot: @{(await bot.get_me()).username or 'unknown'}\n"
+        f"👤 Assistant: {me.first_name}\n"
+        f"🆔 Assistant ID: {me.id}\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "✅ Bot started successfully!\n"
+        "🎶 Voice Chat Music System: ONLINE\n"
+        "⚡ Ready to play music!\n"
+    )
+
+    await asyncio.Event().wait()
