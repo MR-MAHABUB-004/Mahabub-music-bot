@@ -1,44 +1,6 @@
 import asyncio
 import logging
 
-# ============================================================
-# Pyrogram -> PyTgCalls compatibility
-# PyTgCalls expects these old exception names.
-# Pyrogram 2.0.106 exposes GroupCallForbidden/Invalid instead.
-# ============================================================
-
-import pyrogram.errors
-
-# GroupcallForbidden
-if not hasattr(pyrogram.errors, "GroupcallForbidden"):
-    if hasattr(pyrogram.errors, "GroupCallForbidden"):
-        pyrogram.errors.GroupcallForbidden = (
-            pyrogram.errors.GroupCallForbidden
-        )
-    else:
-        class GroupcallForbidden(Exception):
-            pass
-
-        pyrogram.errors.GroupcallForbidden = GroupcallForbidden
-
-
-# GroupcallInvalid
-if not hasattr(pyrogram.errors, "GroupcallInvalid"):
-    if hasattr(pyrogram.errors, "GroupCallInvalid"):
-        pyrogram.errors.GroupcallInvalid = (
-            pyrogram.errors.GroupCallInvalid
-        )
-    else:
-        class GroupcallInvalid(Exception):
-            pass
-
-        pyrogram.errors.GroupcallInvalid = GroupcallInvalid
-
-
-# ============================================================
-# Imports
-# ============================================================
-
 from pyrogram import Client, filters
 from pyrogram.types import Message
 
@@ -127,7 +89,9 @@ players = {}
 # ============================================================
 
 def get_player(chat_id: int) -> MusicPlayer:
+
     if chat_id not in players:
+
         players[chat_id] = MusicPlayer(
             chat_id,
             calls,
@@ -146,7 +110,15 @@ async def stream_end_handler(_, update: StreamEnded):
     player = players.get(update.chat_id)
 
     if player:
-        await player.on_stream_end()
+
+        try:
+            await player.on_stream_end()
+
+        except Exception:
+
+            log.exception(
+                "Stream end handler failed"
+            )
 
 
 # ============================================================
@@ -185,17 +157,23 @@ async def play_cmd(_, message: Message):
     )
 
     if len(parts) < 2:
-        return await message.reply_text(
+
+        await message.reply_text(
             "❌ **Usage:**\n"
             "`/play song name or YouTube URL`"
         )
 
+        return
+
     query = parts[1].strip()
 
     if not query:
-        return await message.reply_text(
+
+        await message.reply_text(
             "❌ Please provide a song name or URL."
         )
+
+        return
 
     status = await message.reply_text(
         "🔎 **Searching...**"
@@ -252,9 +230,11 @@ async def pause_cmd(_, message: Message):
 
     try:
 
-        await get_player(
+        player = get_player(
             message.chat.id
-        ).pause()
+        )
+
+        await player.pause()
 
         await message.reply_text(
             "⏸ **Paused**"
@@ -280,9 +260,11 @@ async def resume_cmd(_, message: Message):
 
     try:
 
-        await get_player(
+        player = get_player(
             message.chat.id
-        ).resume()
+        )
+
+        await player.resume()
 
         await message.reply_text(
             "▶️ **Resumed**"
@@ -308,9 +290,11 @@ async def skip_cmd(_, message: Message):
 
     try:
 
-        title = await get_player(
+        player = get_player(
             message.chat.id
-        ).skip()
+        )
+
+        title = await player.skip()
 
         if title:
 
@@ -349,9 +333,11 @@ async def stop_cmd(_, message: Message):
 
     try:
 
-        await get_player(
+        player = get_player(
             message.chat.id
-        ).stop()
+        )
+
+        await player.stop()
 
         await message.reply_text(
             "⏹ **Stopped and left the voice chat.**"
@@ -377,10 +363,12 @@ async def queue_cmd(_, message: Message):
 
     try:
 
+        player = get_player(
+            message.chat.id
+        )
+
         await message.reply_text(
-            get_player(
-                message.chat.id
-            ).queue_text()
+            player.queue_text()
         )
 
     except Exception as exc:
@@ -403,10 +391,12 @@ async def now_cmd(_, message: Message):
 
     try:
 
+        player = get_player(
+            message.chat.id
+        )
+
         await message.reply_text(
-            get_player(
-                message.chat.id
-            ).now_text()
+            player.now_text()
         )
 
     except Exception as exc:
@@ -427,31 +417,53 @@ async def now_cmd(_, message: Message):
 @bot.on_message(filters.command("volume"))
 async def volume_cmd(_, message: Message):
 
-    parts = message.text.split()
+    if not message.text:
 
-    if len(parts) != 2:
-        return await message.reply_text(
+        await message.reply_text(
             "❌ Usage: `/volume 1-200`"
         )
 
+        return
+
+    parts = message.text.split()
+
+    if len(parts) != 2:
+
+        await message.reply_text(
+            "❌ Usage: `/volume 1-200`"
+        )
+
+        return
+
     try:
+
         value = int(parts[1])
 
     except ValueError:
-        return await message.reply_text(
+
+        await message.reply_text(
             "❌ Volume must be a number."
         )
 
+        return
+
     if not 1 <= value <= 200:
-        return await message.reply_text(
+
+        await message.reply_text(
             "❌ Volume must be between 1 and 200."
         )
 
+        return
+
     try:
 
-        await get_player(
+        player = get_player(
             message.chat.id
-        ).set_volume(value)
+        )
+
+        await player.set_volume(
+            value
+        )
 
         await message.reply_text(
             f"🔊 Volume: **{value}%**"
@@ -478,22 +490,45 @@ async def main():
         "Starting Mahabub Music Bot..."
     )
 
-    # Start bot
+    # --------------------------------------------------------
+    # Start Telegram bot
+    # --------------------------------------------------------
+
     await bot.start()
 
     log.info(
         "Command bot started."
     )
 
-    # Start user account
+    # --------------------------------------------------------
+    # Start Telegram user account
+    # --------------------------------------------------------
+
     await assistant.start()
 
     log.info(
         "Assistant user account started."
     )
 
-      # Start voice call engine
+    # --------------------------------------------------------
+    # Start PyTgCalls
+    # --------------------------------------------------------
+
     await calls.start()
+
+    log.info(
+        "Voice call engine started."
+    )
+
+    # --------------------------------------------------------
+    # Get bot information
+    # --------------------------------------------------------
+
+    bot_me = await bot.get_me()
+
+    # --------------------------------------------------------
+    # Get assistant information
+    # --------------------------------------------------------
 
     me = await assistant.get_me()
 
@@ -504,11 +539,15 @@ async def main():
         me.id,
     )
 
+    # --------------------------------------------------------
+    # Startup information
+    # --------------------------------------------------------
+
     print(
         "\n"
         "🎵 MAHABUB MUSIC BOT\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"🤖 Bot: @{(await bot.get_me()).username or 'unknown'}\n"
+        f"🤖 Bot: @{bot_me.username or 'unknown'}\n"
         f"👤 Assistant: {me.first_name}\n"
         f"🆔 Assistant ID: {me.id}\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -517,4 +556,33 @@ async def main():
         "⚡ Ready to play music!\n"
     )
 
+    # --------------------------------------------------------
+    # Keep bot alive
+    # --------------------------------------------------------
+
     await asyncio.Event().wait()
+
+
+# ============================================================
+# RUN
+# ============================================================
+
+if __name__ == "__main__":
+
+    try:
+
+        asyncio.run(main())
+
+    except KeyboardInterrupt:
+
+        log.info(
+            "Bot stopped by user."
+        )
+
+    except Exception:
+
+        log.exception(
+            "Fatal error"
+        )
+
+        raise
