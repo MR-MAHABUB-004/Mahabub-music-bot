@@ -1,112 +1,185 @@
 import asyncio
 import logging
+
 from pyrogram import Client, filters
 from pyrogram.types import Message
-from pyrogram.errors import RPCError
-from config import API_ID, API_HASH, BOT_TOKEN
+from pytgcalls import PyTgCalls
+from pytgcalls import filters as tg_filters
+from pytgcalls.types import StreamEnded
+
+from config import API_ID, API_HASH, BOT_TOKEN, SESSION_STRING
 from player import MusicPlayer
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+)
 log = logging.getLogger("MahabubMusicBot")
 
-app = Client(
-    "mahbub_music_bot",
+bot = Client(
+    "mahbub_bot",
     api_id=API_ID,
     api_hash=API_HASH,
     bot_token=BOT_TOKEN,
 )
 
+# A USER account is required for Telegram voice-chat participation.
+assistant = Client(
+    "mahbub_assistant",
+    api_id=API_ID,
+    api_hash=API_HASH,
+    session_string=SESSION_STRING,
+)
+
+calls = PyTgCalls(assistant)
 players = {}
 
-def get_player(chat_id):
+
+def get_player(chat_id: int) -> MusicPlayer:
     if chat_id not in players:
-        players[chat_id] = MusicPlayer(chat_id, app)
+        players[chat_id] = MusicPlayer(chat_id, calls)
     return players[chat_id]
 
-@app.on_message(filters.command("start"))
-async def start(_, m: Message):
-    await m.reply_text(
+
+@calls.on_update(tg_filters.stream_end())
+async def stream_end_handler(_, update: StreamEnded):
+    player = players.get(update.chat_id)
+    if player:
+        await player.on_stream_end()
+
+
+@bot.on_message(filters.command("start"))
+async def start_cmd(_, message: Message):
+    await message.reply_text(
         "🎵 **Mahabub Music Bot**\n\n"
         "Fast Telegram Voice Chat Music Player.\n\n"
-        "Use `/play song name` to start.\n"
-        "`/pause` `/resume` `/skip` `/stop` `/queue` `/now` `/volume 1-100`"
+        "▶️ `/play <song or YouTube URL>`\n"
+        "⏸ `/pause`  ▶️ `/resume`\n"
+        "⏭ `/skip`  ⏹ `/stop`\n"
+        "📜 `/queue`  🎵 `/now`\n"
+        "🔊 `/volume 1-200`"
     )
 
-@app.on_message(filters.command(["play", "p"]))
-async def play(_, m: Message):
-    query = m.text.split(maxsplit=1)[1] if len(m.text.split(maxsplit=1)) > 1 else None
-    if not query:
-        return await m.reply_text("❌ Usage: `/play song name or YouTube URL`")
-    msg = await m.reply_text("🔎 Searching...")
+
+@bot.on_message(filters.command(["play", "p"]))
+async def play_cmd(_, message: Message):
+    parts = message.text.split(maxsplit=1)
+    if len(parts) < 2:
+        return await message.reply_text(
+            "❌ Usage: `/play song name or YouTube URL`"
+        )
+
+    query = parts[1].strip()
+    status = await message.reply_text("🔎 **Searching...**")
+
     try:
-        player = get_player(m.chat.id)
-        title = await player.add(query, m.from_user.id if m.from_user else 0)
-        await msg.edit_text(f"🎵 **Queued:** {title}")
+        player = get_player(message.chat.id)
+        title = await player.add(query, message.from_user.id if message.from_user else 0)
+
+        if player.current:
+            await status.edit_text(f"🎵 **Queued:** {title}")
+        else:
+            await status.edit_text(f"🎵 **Starting:** {title}")
+
         await player.start_if_needed()
-    except Exception as e:
-        log.exception("play failed")
-        await msg.edit_text(f"❌ Error: `{str(e)[:800]}`")
 
-@app.on_message(filters.command("pause"))
-async def pause(_, m: Message):
+    except Exception as exc:
+        log.exception("Play failed")
+        await status.edit_text(f"❌ `{str(exc)[:900]}`")
+
+
+@bot.on_message(filters.command("pause"))
+async def pause_cmd(_, message: Message):
     try:
-        await get_player(m.chat.id).pause()
-        await m.reply_text("⏸ Paused")
-    except Exception as e:
-        await m.reply_text(f"❌ {e}")
+        await get_player(message.chat.id).pause()
+        await message.reply_text("⏸ **Paused**")
+    except Exception as exc:
+        await message.reply_text(f"❌ `{exc}`")
 
-@app.on_message(filters.command("resume"))
-async def resume(_, m: Message):
+
+@bot.on_message(filters.command("resume"))
+async def resume_cmd(_, message: Message):
     try:
-        await get_player(m.chat.id).resume()
-        await m.reply_text("▶️ Resumed")
-    except Exception as e:
-        await m.reply_text(f"❌ {e}")
+        await get_player(message.chat.id).resume()
+        await message.reply_text("▶️ **Resumed**")
+    except Exception as exc:
+        await message.reply_text(f"❌ `{exc}`")
 
-@app.on_message(filters.command("skip"))
-async def skip(_, m: Message):
+
+@bot.on_message(filters.command("skip"))
+async def skip_cmd(_, message: Message):
     try:
-        title = await get_player(m.chat.id).skip()
-        await m.reply_text(f"⏭ Skipped.\n🎵 Next: **{title}**" if title else "⏭ Queue finished.")
-    except Exception as e:
-        await m.reply_text(f"❌ {e}")
+        title = await get_player(message.chat.id).skip()
+        if title:
+            await message.reply_text(f"⏭ **Skipped**\n🎵 **Next:** {title}")
+        else:
+            await message.reply_text("⏭ Queue finished.")
+    except Exception as exc:
+        await message.reply_text(f"❌ `{exc}`")
 
-@app.on_message(filters.command("stop"))
-async def stop(_, m: Message):
+
+@bot.on_message(filters.command(["stop", "leave"]))
+async def stop_cmd(_, message: Message):
     try:
-        await get_player(m.chat.id).stop()
-        await m.reply_text("⏹ Stopped and left the voice chat.")
-    except Exception as e:
-        await m.reply_text(f"❌ {e}")
+        await get_player(message.chat.id).stop()
+        await message.reply_text("⏹ **Stopped and left the voice chat.**")
+    except Exception as exc:
+        await message.reply_text(f"❌ `{exc}`")
 
-@app.on_message(filters.command("leave"))
-async def leave(_, m: Message):
+
+@bot.on_message(filters.command("queue"))
+async def queue_cmd(_, message: Message):
+    await message.reply_text(get_player(message.chat.id).queue_text())
+
+
+@bot.on_message(filters.command("now"))
+async def now_cmd(_, message: Message):
+    await message.reply_text(get_player(message.chat.id).now_text())
+
+
+@bot.on_message(filters.command("volume"))
+async def volume_cmd(_, message: Message):
+    parts = message.text.split()
+    if len(parts) != 2:
+        return await message.reply_text("❌ Usage: `/volume 1-200`")
+
     try:
-        await get_player(m.chat.id).stop()
-        await m.reply_text("👋 Left the voice chat.")
-    except Exception as e:
-        await m.reply_text(f"❌ {e}")
+        value = int(parts[1])
+    except ValueError:
+        return await message.reply_text("❌ Volume must be a number.")
 
-@app.on_message(filters.command("queue"))
-async def queue(_, m: Message):
-    q = get_player(m.chat.id).queue_text()
-    await m.reply_text(q)
+    if not 1 <= value <= 200:
+        return await message.reply_text("❌ Volume must be between 1 and 200.")
 
-@app.on_message(filters.command("now"))
-async def now(_, m: Message):
-    await m.reply_text(get_player(m.chat.id).now_text())
-
-@app.on_message(filters.command("volume"))
-async def volume(_, m: Message):
-    parts=m.text.split()
-    if len(parts)!=2 or not parts[1].isdigit() or not 1 <= int(parts[1]) <= 100:
-        return await m.reply_text("❌ Usage: `/volume 1-100`")
     try:
-        await get_player(m.chat.id).set_volume(int(parts[1]))
-        await m.reply_text(f"🔊 Volume set to {parts[1]}%")
-    except Exception as e:
-        await m.reply_text(f"❌ {e}")
+        await get_player(message.chat.id).set_volume(value)
+        await message.reply_text(f"🔊 Volume: **{value}%**")
+    except Exception as exc:
+        await message.reply_text(f"❌ `{exc}`")
+
+
+async def main():
+    log.info("Starting command bot...")
+    await bot.start()
+
+    log.info("Starting assistant user account...")
+    await assistant.start()
+
+    log.info("Starting PyTgCalls...")
+    await calls.start()
+
+    me = await assistant.get_me()
+    log.info("Voice assistant logged in as %s (%s)", me.first_name, me.id)
+
+    print("🎵 Mahabub Music Bot is running.")
+
+    try:
+        await asyncio.Event().wait()
+    finally:
+        await calls.stop()
+        await assistant.stop()
+        await bot.stop()
+
 
 if __name__ == "__main__":
-    print("🎵 Mahabub Music Bot starting...")
-    app.run()
+    asyncio.run(main())

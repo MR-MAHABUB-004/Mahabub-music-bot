@@ -1,39 +1,52 @@
-# Mahabub Music Bot 🎵
+# Mahabub Music Bot v2 🎵
 
-Fast Telegram group voice-chat music bot using Pyrogram, PyTgCalls, yt-dlp and FFmpeg.
+Fast Telegram Voice Chat music bot using:
 
-## Requirements
-
-- Python 3.10/3.11 recommended
+- Pyrogram
+- PyTgCalls 2.3.3
+- yt-dlp
 - FFmpeg
-- Telegram Bot Token
-- Telegram API ID and API Hash
-- The bot must be an administrator in the group and be allowed to manage voice chats.
 
-## Install
+## Important: voice chat requires a USER account
 
-```bash
-sudo apt update
-sudo apt install -y ffmpeg python3 python3-pip
-pip3 install -r requirements.txt
+Telegram's `phone.joinGroupCall` method is restricted to users, so the
+voice player uses a separate Pyrogram USER session. The normal BotFather
+bot handles commands.
+
+The USER account must be in the group and should have permission to
+manage voice chats.
+
+## Environment variables
+
+```env
+API_ID=YOUR_API_ID
+API_HASH=YOUR_API_HASH
+BOT_TOKEN=YOUR_BOT_TOKEN
+SESSION_STRING=YOUR_USER_SESSION_STRING
 ```
 
-Set environment variables:
+## Generate SESSION_STRING
+
+Install requirements locally:
 
 ```bash
-export API_ID="YOUR_API_ID"
-export API_HASH="YOUR_API_HASH"
-export BOT_TOKEN="YOUR_BOT_TOKEN"
+pip install -r requirements.txt
 ```
 
-Run:
+Then:
 
 ```bash
-python3 bot.py
+python generate_session.py
 ```
+
+Enter the USER account phone number, Telegram login code and 2FA password
+if enabled. Copy the generated session string into `SESSION_STRING`.
+
+Do not share the session string.
 
 ## Commands
 
+```text
 /play <song or YouTube URL>
 /pause
 /resume
@@ -42,21 +55,39 @@ python3 bot.py
 /leave
 /queue
 /now
-/volume 1-100
-
-## Docker
-
-```bash
-docker build -t mahbub-music-bot .
-docker run --restart unless-stopped \
-  -e API_ID="YOUR_API_ID" \
-  -e API_HASH="YOUR_API_HASH" \
-  -e BOT_TOKEN="YOUR_BOT_TOKEN" \
-  mahbub-music-bot
+/volume 1-200
 ```
 
-## Speed notes
+## Render
 
-The player resolves the audio stream and sends it to PyTgCalls without downloading the complete song first. YouTube extraction is the main startup bottleneck, so keeping yt-dlp updated is important.
+Use **Docker**.
 
-This is a starter production-oriented project. PyTgCalls APIs can change between releases; pin the dependency versions on your VPS after confirming a working deployment.
+Add these four Environment Variables in Render:
+
+```text
+API_ID
+API_HASH
+BOT_TOKEN
+SESSION_STRING
+```
+
+No `.env` file is required on Render.
+
+## VPS
+
+```bash
+sudo apt update
+sudo apt install -y ffmpeg python3 python3-pip
+
+pip3 install -r requirements.txt
+
+python3 bot.py
+```
+
+For a VPS, PM2/systemd/supervisor can keep the process alive.
+
+## Speed
+
+The player uses a direct media stream through PyTgCalls' current
+`MediaStream` API. It does not download the complete song before
+starting playback.
